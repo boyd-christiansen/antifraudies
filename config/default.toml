@@ -1,0 +1,41 @@
+# Default configuration for antifraudies.
+# Override any value with an environment variable prefixed ANTIFRAUDIES_ and using
+# "__" as the nesting delimiter, e.g. ANTIFRAUDIES_CRAWL__MIN_INTERVAL_SECONDS=5.0
+
+[paths]
+# All runtime evidence lives under data_dir (gitignored). Raw bytes are immutable.
+data_dir = "data"
+db_filename = "antifraudies.db"
+blobs_subdir = "blobs"       # content-addressed raw image bytes + JSON sidecars
+pages_subdir = "pages"       # content-addressed raw HTML page snapshots
+cache_subdir = "cache"       # on-disk HTTP cache (never fetch the same URL twice)
+
+[crawl]
+# Honest identification. We identify the crawler truthfully and give a contact.
+# NOTE: thermofisher.com sits behind Akamai and rejects requests lacking a realistic
+# Accept header; we send realistic Accept headers but do NOT disguise our identity in
+# the UA token. If the honest UA is blocked at scale, that is a defensibility decision
+# to surface to a human, not something to silently work around.
+user_agent = "antifraudies-research-crawler/0.1 (+https://example.org/antifraudies; research-integrity image-provenance study)"
+contact = "boyd@pldm.ai"
+
+# Conservative, defensible pacing. Real crawl-delay from robots.txt overrides if larger.
+min_interval_seconds = 3.0       # minimum gap between requests to the same host
+jitter_seconds = 1.0             # added random 0..jitter on top of the interval
+max_retries = 4                  # on 429 / 5xx / transport errors
+backoff_base_seconds = 2.0       # exponential: base * 2**attempt (+ jitter)
+backoff_max_seconds = 120.0
+timeout_seconds = 30.0
+respect_robots = true
+
+[archive]
+# Optional external preservation via the Wayback Machine "Save Page Now" endpoint.
+# OFF by default: it is outward-facing and slow. Enable deliberately for a real run.
+wayback_save_pages = false
+wayback_save_images = false
+
+[zenodo]
+# The curated set of documented problematic images (labeled positives for phase 2).
+# We record the manifest now; downloading the image bytes is deferred to phase 2.
+doi = "10.5281/zenodo.20402475"
+download_bytes = false

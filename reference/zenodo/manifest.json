@@ -1,0 +1,34 @@
+{
+  "doi": "10.5281/zenodo.20561245",
+  "title": "Problematic images in vendor antibody verification data",
+  "version": "260605",
+  "publication_date": "2026-06-05",
+  "file_count": 4,
+  "files": [
+    {
+      "key": "README.md",
+      "size": 2586,
+      "checksum": "md5:f145625bc20b29274da80813bdeb1016",
+      "link": "https://zenodo.org/api/records/20561245/files/README.md/content"
+    },
+    {
+      "key": "260605_catch_all_spreadsheet.csv",
+      "size": 160015,
+      "checksum": "md5:5d6ce61e7b90e49f0304ecc54d50d0a6",
+      "link": "https://zenodo.org/api/records/20561245/files/260605_catch_all_spreadsheet.csv/content"
+    },
+    {
+      "key": "260605_annotated_images.zip",
+      "size": 44824006,
+      "checksum": "md5:0f89456a30e3cd0c9c51d5eb5288d0f8",
+      "link": "https://zenodo.org/api/records/20561245/files/260605_annotated_images.zip/content"
+    },
+    {
+      "key": "260605_original_images.zip",
+      "size": 14474469,
+      "checksum": "md5:5c8d704f978adbb07e01cab23773cc8e",
+      "link": "https://zenodo.org/api/records/20561245/files/260605_original_images.zip/content"
+    }
+  ],
+  "note": "Manifest only. Image bytes are downloaded in phase 2 (config [zenodo] download_bytes = true). These are external, third-party annotations \u2014 labeled positives for validation, NOT ground truth inside this system."
+}

@@ -1,0 +1,46 @@
+[project]
+name = "antifraudies"
+version = "0.1.0"
+description = "Catalog-scale forensic image-provenance pipeline for antibody vendor verification images. Surfaces apparent manipulation for human review; never renders a verdict."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+antifraudies = "antifraudies.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/antifraudies"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: Typer's documented pattern is `param: T = typer.Option(...)` in defaults.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer Option/Argument help strings push these declaration lines past the limit.
+"src/antifraudies/cli.py" = ["E501"]

@@ -1,0 +1,15 @@
+# Bounded seed for the first Thermo Fisher scrape run.
+# One entry per line: either a full product URL or a bare catalog number
+# (a bare catalog number is resolved via Thermo's catalog-number URL, which redirects
+# to the canonical slug URL). Lines starting with '#' are ignored.
+#
+# Build a larger seed by appending catalog numbers from the documented-image set
+# (reference/zenodo/) or from `antifraudies enumerate`.
+
+# The product that started the investigation — a known-positive to inspect (full URL).
+https://www.thermofisher.com/antibody/product/p53-Antibody-clone-DO-7-Monoclonal/MA5-12557
+
+# A couple of unrelated products (catalog-only) to exercise seed resolution and the
+# cross-image queries over more than one product.
+67069-2-IG
+A300-044A
