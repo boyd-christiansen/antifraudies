@@ -26,10 +26,12 @@ app = typer.Typer(
 )
 
 
-def _build(vendor: str):
+def _build(vendor: str, concurrency: int | None = None):
     if vendor not in ADAPTERS:
         raise typer.BadParameter(f"unknown vendor '{vendor}'. Known: {', '.join(ADAPTERS)}")
     settings = get_settings()
+    if concurrency is not None:
+        settings.crawl.concurrency = concurrency
     settings.ensure_dirs()
     client = PoliteClient(settings)
     robots = RobotsPolicy(client, settings.crawl.user_agent) if settings.crawl.respect_robots else None
@@ -58,10 +60,11 @@ def scrape(
     vendor: str = typer.Option("thermofisher", "--vendor", "-v"),
     seed: Path = typer.Option(None, "--seed", help="Seed file: one URL or catalog number per line."),
     limit: int = typer.Option(None, "--limit", "-n", help="Cap products when crawling the sitemap."),
+    concurrency: int = typer.Option(None, "--concurrency", "-c", help="Max requests in flight (overrides config)."),
     no_images: bool = typer.Option(False, "--no-images", help="Record metadata but skip image bytes."),
 ) -> None:
-    """Scrape products and persist everything as preserved evidence."""
-    settings, client, adapter, db = _build(vendor)
+    """Scrape products: fetch pages concurrently, store image bytes + metadata rows."""
+    settings, client, adapter, db = _build(vendor, concurrency=concurrency)
     try:
         if seed is not None:
             refs = adapter.seed(iter_seed_file(seed))

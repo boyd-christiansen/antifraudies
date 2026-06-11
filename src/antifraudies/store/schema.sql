@@ -1,10 +1,14 @@
--- Normalized evidence store (SQLite). Shared foundation for phase 1 (scrape) and
--- phase 2 (forensic pipelines). Raw image/page BYTES live in the content-addressed
--- filesystem blob store, not here; this database holds the queryable normalized records
--- and points at blobs by sha256. Raw bytes are immutable once written.
+-- Normalized store (SQLite). Shared foundation for phase 1 (scrape) and phase 2 (forensic
+-- pipelines). Raw image BYTES live in the content-addressed filesystem blob store, not
+-- here; this database holds the queryable normalized records and points at image blobs by
+-- sha256. Image bytes are immutable once written.
 --
--- Schema is shaped for CROSS-IMAGE querying (whole-corpus comparison), which is where
--- the highest-value forensic signals live, and for later band-level extraction.
+-- We do NOT store the source page HTML: the project cares about which images are reused or
+-- altered and where, not about archiving pages. An image's source page is its product page
+-- (join via catalog_number -> products.product_url).
+--
+-- Schema is shaped for CROSS-IMAGE querying (whole-corpus comparison), which is where the
+-- highest-value forensic signals live, and for later band-level extraction.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -20,17 +24,6 @@ CREATE TABLE IF NOT EXISTS products (
     first_seen      TEXT,                     -- ISO-8601 UTC
     last_seen       TEXT,
     PRIMARY KEY (vendor, catalog_number)
-);
-
-CREATE TABLE IF NOT EXISTS page_snapshots (
-    content_sha256  TEXT PRIMARY KEY,         -- points at data/pages/<sha>.html
-    vendor          TEXT NOT NULL,
-    url             TEXT NOT NULL,
-    catalog_number  TEXT,
-    byte_size       INTEGER NOT NULL,
-    http_status     INTEGER NOT NULL,
-    fetched_at      TEXT NOT NULL,
-    wayback_url     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS verification_images (
@@ -67,13 +60,12 @@ CREATE TABLE IF NOT EXISTS verification_images (
     fn_timestamp            TEXT,             -- verbatim timestamp token
     fn_pubmed_id            TEXT,
 
-    -- Evidence / capture record
+    -- Capture record
     content_sha256          TEXT,             -- points at data/blobs/<sha>.<ext>; NULL until bytes fetched
     byte_size               INTEGER,
     content_type            TEXT,
     http_status             INTEGER,
     captured_at             TEXT,
-    source_page_sha256      TEXT REFERENCES page_snapshots(content_sha256),
 
     -- Identity for idempotent upsert: a given vendor image on a given product.
     UNIQUE (vendor, catalog_number, image_filename),

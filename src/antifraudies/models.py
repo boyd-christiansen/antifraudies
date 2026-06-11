@@ -73,13 +73,14 @@ class VerificationImage(BaseModel):
     # Parsed filename metadata
     filename_metadata: FilenameMetadata | None = None
 
-    # Evidence / capture record (filled in once bytes are fetched)
+    # Capture record (filled in once the image bytes are fetched). The image's source page
+    # is the product page (join via catalog_number -> products.product_url); we record where
+    # it came from, not a stored copy of the page itself.
     content_sha256: str | None = None
     byte_size: int | None = None
     content_type: str | None = None
     http_status: int | None = None
     captured_at: datetime | None = None
-    source_page_sha256: str | None = None  # links image to the page snapshot it came from
 
 
 class Product(BaseModel):
@@ -96,23 +97,14 @@ class Product(BaseModel):
     last_seen: datetime | None = None
 
 
-class PageSnapshot(BaseModel):
-    """An immutable snapshot of a fetched source page — perishable evidence."""
-
-    vendor: str
-    url: str
-    catalog_number: str | None = None
-    content_sha256: str
-    byte_size: int
-    http_status: int
-    fetched_at: datetime
-    wayback_url: str | None = None  # set if externally archived
-
-
 class ScrapeResult(BaseModel):
-    """What an adapter returns for a single product page."""
+    """What an adapter returns for a single product page.
+
+    We keep the product metadata and the per-image records (the rows that make cross-product
+    image-reuse detectable); we deliberately do NOT retain the raw page HTML — the project
+    cares about which images are reused/altered and where, not about archiving the page as
+    litigation evidence.
+    """
 
     product: Product
     images: list[VerificationImage]
-    page_snapshot: PageSnapshot
-    raw_html: str

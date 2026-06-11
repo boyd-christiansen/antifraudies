@@ -1,18 +1,18 @@
-"""Content-addressed blob store for raw evidence bytes.
+"""Content-addressed blob store for image bytes.
 
-Every captured artifact (image bytes, page HTML) is stored under its SHA-256 digest, so:
-  - identical content is stored once (a natural whole-image-reuse signal), and
-  - bytes are immutable: the path IS the hash, so a write either matches existing
-    content or creates a new object. We never modify a blob after writing it.
+Every image is stored under its SHA-256 digest, so:
+  - identical content is stored once across the WHOLE catalog (the cheap whole-image-reuse
+    signal: one image used on many products collapses to a single blob, while each listing
+    still keeps its own row in the database), and
+  - bytes are immutable: the path IS the hash, so a write either matches existing content
+    or creates a new object. We never modify a blob after writing it.
 
-Each image blob is written alongside a JSON sidecar holding the full normalized record
-and capture metadata, so the raw evidence is self-describing on disk even without the DB.
+The database is the single source of metadata; blobs hold only the pixels.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 
 
@@ -48,13 +48,6 @@ class BlobStore:
             tmp.write_bytes(data)
             tmp.rename(path)
         return digest
-
-    def write_sidecar(self, digest: str, record: dict) -> Path:
-        """Write a JSON sidecar next to an image blob describing the capture."""
-        path = self._path_for(digest, "json")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
-        return path
 
     def path(self, digest: str, ext: str = "bin") -> Path:
         return self._path_for(digest, ext)

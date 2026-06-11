@@ -12,7 +12,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from ..models import PageSnapshot, Product, VerificationImage
+from ..models import Product, VerificationImage
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -30,7 +30,11 @@ class Database:
         self.conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         self.conn.commit()
 
+    def commit(self) -> None:
+        self.conn.commit()
+
     def close(self) -> None:
+        self.conn.commit()
         self.conn.close()
 
     def __enter__(self) -> Database:
@@ -73,31 +77,6 @@ class Database:
                 "last_seen": _iso(p.last_seen),
             },
         )
-        self.conn.commit()
-
-    def upsert_page_snapshot(self, s: PageSnapshot) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO page_snapshots
-                (content_sha256, vendor, url, catalog_number, byte_size, http_status,
-                 fetched_at, wayback_url)
-            VALUES (:content_sha256, :vendor, :url, :catalog_number, :byte_size,
-                    :http_status, :fetched_at, :wayback_url)
-            ON CONFLICT(content_sha256) DO UPDATE SET
-                wayback_url = COALESCE(excluded.wayback_url, page_snapshots.wayback_url)
-            """,
-            {
-                "content_sha256": s.content_sha256,
-                "vendor": s.vendor,
-                "url": s.url,
-                "catalog_number": s.catalog_number,
-                "byte_size": s.byte_size,
-                "http_status": s.http_status,
-                "fetched_at": _iso(s.fetched_at),
-                "wayback_url": s.wayback_url,
-            },
-        )
-        self.conn.commit()
 
     def upsert_image(self, img: VerificationImage) -> None:
         fn = img.filename_metadata
@@ -110,7 +89,7 @@ class Database:
                  benchsci_pubmed_id, image_filename, image_url_full, image_url_variants,
                  fn_catalog, fn_target, fn_application, fn_av_marker, fn_timestamp,
                  fn_pubmed_id, content_sha256, byte_size, content_type, http_status,
-                 captured_at, source_page_sha256)
+                 captured_at)
             VALUES
                 (:vendor, :catalog_number, :vendor_image_id, :provenance,
                  :provenance_disagreement, :source_type_raw, :application_abbrev,
@@ -118,7 +97,7 @@ class Database:
                  :journal_text, :benchsci_pubmed_id, :image_filename, :image_url_full,
                  :image_url_variants, :fn_catalog, :fn_target, :fn_application,
                  :fn_av_marker, :fn_timestamp, :fn_pubmed_id, :content_sha256, :byte_size,
-                 :content_type, :http_status, :captured_at, :source_page_sha256)
+                 :content_type, :http_status, :captured_at)
             ON CONFLICT(vendor, catalog_number, image_filename) DO UPDATE SET
                 vendor_image_id         = excluded.vendor_image_id,
                 provenance              = excluded.provenance,
@@ -133,8 +112,7 @@ class Database:
                                                    verification_images.content_type),
                 http_status             = excluded.http_status,
                 captured_at             = COALESCE(excluded.captured_at,
-                                                   verification_images.captured_at),
-                source_page_sha256      = excluded.source_page_sha256
+                                                   verification_images.captured_at)
             """,
             {
                 "vendor": img.vendor,
@@ -165,10 +143,8 @@ class Database:
                 "content_type": img.content_type,
                 "http_status": img.http_status,
                 "captured_at": _iso(img.captured_at),
-                "source_page_sha256": img.source_page_sha256,
             },
         )
-        self.conn.commit()
 
     # ------------------------------------------------------------------ reads
 

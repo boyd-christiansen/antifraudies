@@ -1,26 +1,32 @@
-"""Scrape orchestration: enumerate -> fetch -> normalize -> persist as preserved evidence.
+"""Scrape orchestration: enumerate -> fetch (concurrently) -> normalize -> persist.
 
-This ties the polite crawler, the vendor adapter, and the evidence store together. For
-each product it: snapshots the page bytes (content-addressed), upserts the product and its
-verification images, downloads each image's original bytes (immutable, hashed, with a JSON
-sidecar), and optionally submits the page to the Wayback Machine.
+For each product we fetch the page, parse out the product metadata and per-image records,
+and download each image's bytes into the content-addressed blob store (deduped across the
+whole catalog). We keep the metadata rows and the image pixels; we do NOT store the page
+HTML or per-image sidecars — the project cares about which images are reused/altered and
+where, not about archiving pages.
 
-Framing discipline: this captures and normalizes evidence. It does not score or judge.
+Throughput: product pages are fetched by a thread pool (``crawl.concurrency``), with each
+worker downloading its product's images. Blob writes happen in the worker threads (atomic,
+content-addressed, concurrency-safe); all SQLite writes happen on the main thread (one
+connection, single writer). This finishes the full catalog in well under a day.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from .adapters.base import ProductRef, VendorAdapter
 from .config import Settings
-from .crawl.archive import save_page_now
 from .crawl.http import PoliteClient
-from .models import ScrapeResult
+from .models import ScrapeResult, VerificationImage
 from .store.blobs import BlobStore
 from .store.db import Database
+
+_COMMIT_EVERY = 100  # products per SQLite commit (see run())
 
 
 @dataclass
@@ -45,69 +51,103 @@ class ScrapeOrchestrator:
         self.adapter = adapter
         self.db = db
         self.image_blobs = BlobStore(settings.blobs_dir)
-        self.page_blobs = BlobStore(settings.pages_dir)
+        self.concurrency = max(1, settings.crawl.concurrency)
 
     def run(
         self,
         refs: Iterable[ProductRef],
         *,
         download_images: bool = True,
+        progress_every: int = 1000,
     ) -> ScrapeSummary:
         summary = ScrapeSummary()
-        for ref in refs:
-            try:
-                result = self.adapter.fetch_product(ref)
-            except Exception as exc:  # noqa: BLE001 — one bad product must not abort the run
-                summary.errors.append(f"{ref.catalog_number}: {exc}")
-                continue
-            self._persist(result, download_images=download_images, summary=summary)
-            summary.products += 1
+        refs_iter = iter(refs)
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
+            pending: dict[Future, ProductRef] = {}
+
+            def submit_next() -> bool:
+                ref = next(refs_iter, None)
+                if ref is None:
+                    return False
+                pending[ex.submit(self._fetch_one, ref, download_images)] = ref
+                return True
+
+            # Keep ~2x concurrency in flight so workers never starve between completions.
+            for _ in range(self.concurrency * 2):
+                if not submit_next():
+                    break
+
+            while pending:
+                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    ref = pending.pop(fut)
+                    try:
+                        result = fut.result()
+                    except Exception as exc:  # noqa: BLE001 — one bad product never aborts the run
+                        summary.errors.append(f"{ref.catalog_number}: {exc}")
+                    else:
+                        self._write_result(result, summary)
+                    submit_next()
+                    n = summary.products
+                    # Batch SQLite commits: committing per row fsyncs constantly and stalls
+                    # the main thread, starving the worker pool. Commit every _COMMIT_EVERY.
+                    if n and n % _COMMIT_EVERY == 0:
+                        self.db.commit()
+                    if progress_every and n and n % progress_every == 0:
+                        self._log_progress(summary)
+
+        self.db.commit()
         return summary
 
-    # ------------------------------------------------------------------ persist
+    # -- worker (runs in a thread; no DB access) -----------------------------
 
-    def _persist(
-        self, result: ScrapeResult, *, download_images: bool, summary: ScrapeSummary
-    ) -> None:
-        # 1. Page snapshot bytes (perishable evidence) -> content-addressed store.
-        self.page_blobs.put(result.raw_html.encode("utf-8"), ext="html")
+    def _fetch_one(self, ref: ProductRef, download_images: bool) -> ScrapeResult:
+        result = self.adapter.fetch_product(ref)
+        if download_images:
+            for img in result.images:
+                if img.image_url_full:
+                    try:
+                        self._capture_image_bytes(img)
+                    except Exception:  # noqa: BLE001 — a missing image never drops the row
+                        pass
+        return result
 
-        # 2. Optional external archival of the page.
-        if self.settings.archive.wayback_save_pages:
-            result.page_snapshot.wayback_url = save_page_now(
-                result.page_snapshot.url, user_agent=self.settings.crawl.user_agent
-            )
-
-        self.db.upsert_page_snapshot(result.page_snapshot)
-        self.db.upsert_product(result.product)
-
-        # 3. Each verification image: download original bytes, hash, sidecar, record.
-        for img in result.images:
-            if download_images and img.image_url_full:
-                try:
-                    self._capture_image_bytes(img, summary)
-                except Exception as exc:  # noqa: BLE001
-                    summary.errors.append(f"{img.image_filename}: {exc}")
-            self.db.upsert_image(img)
-            summary.images += 1
-            key = img.provenance.value
-            summary.provenance_counts[key] = summary.provenance_counts.get(key, 0) + 1
-
-    def _capture_image_bytes(self, img, summary: ScrapeSummary) -> None:
-        resp = self.client.get(img.image_url_full)
+    def _capture_image_bytes(self, img: VerificationImage) -> None:
+        # Don't cache image responses — the blob store already holds the bytes, deduped.
+        resp = self.client.get(img.image_url_full, use_cache=False)
         if not resp.ok:
             img.http_status = resp.status_code
             return
         ext = _ext_for(img.image_filename, resp.headers.get("content-type"))
-        digest = self.image_blobs.put(resp.content, ext=ext)
-        img.content_sha256 = digest
+        img.content_sha256 = self.image_blobs.put(resp.content, ext=ext)
         img.byte_size = len(resp.content)
         img.content_type = resp.headers.get("content-type")
         img.http_status = resp.status_code
         img.captured_at = datetime.now(UTC)
-        # Self-describing sidecar so the raw evidence stands alone on disk.
-        self.image_blobs.write_sidecar(digest, img.model_dump(mode="json"))
-        summary.image_bytes_captured += 1
+
+    # -- main-thread persistence (single SQLite writer) ----------------------
+
+    def _write_result(self, result: ScrapeResult, summary: ScrapeSummary) -> None:
+        self.db.upsert_product(result.product)
+        for img in result.images:
+            self.db.upsert_image(img)
+            summary.images += 1
+            if img.content_sha256:
+                summary.image_bytes_captured += 1
+            key = img.provenance.value
+            summary.provenance_counts[key] = summary.provenance_counts.get(key, 0) + 1
+        summary.products += 1
+
+    def _log_progress(self, summary: ScrapeSummary) -> None:
+        import sys
+
+        print(
+            f"  ... {summary.products} products, {summary.images} images, "
+            f"{summary.image_bytes_captured} bytes captured, {len(summary.errors)} errors",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _ext_for(filename: str, content_type: str | None) -> str:

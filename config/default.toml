@@ -1,38 +1,38 @@
 # Default configuration for antifraudies.
 # Override any value with an environment variable prefixed ANTIFRAUDIES_ and using
-# "__" as the nesting delimiter, e.g. ANTIFRAUDIES_CRAWL__MIN_INTERVAL_SECONDS=5.0
+# "__" as the nesting delimiter, e.g. ANTIFRAUDIES_CRAWL__CONCURRENCY=32
 
 [paths]
-# All runtime evidence lives under data_dir (gitignored). Raw bytes are immutable.
+# All runtime data lives under data_dir (gitignored). Image bytes are immutable.
 data_dir = "data"
 db_filename = "antifraudies.db"
-blobs_subdir = "blobs"       # content-addressed raw image bytes + JSON sidecars
-pages_subdir = "pages"       # content-addressed raw HTML page snapshots
-cache_subdir = "cache"       # on-disk HTTP cache (never fetch the same URL twice)
+blobs_subdir = "blobs"       # content-addressed image bytes (deduped across the whole catalog)
+cache_subdir = "cache"       # on-disk HTTP cache (small things only; see cache_enabled)
 
 [crawl]
-# Honest identification. We identify the crawler truthfully and give a contact.
-# NOTE: thermofisher.com sits behind Akamai and rejects requests lacking a realistic
-# Accept header; we send realistic Accept headers but do NOT disguise our identity in
-# the UA token. If the honest UA is blocked at scale, that is a defensibility decision
-# to surface to a human, not something to silently work around.
+# Honest identification: a truthful UA token plus a contact. We send realistic Accept
+# headers (the target's Akamai edge requires them) but do not disguise our identity.
 user_agent = "antifraudies-research-crawler/0.1 (+https://example.org/antifraudies; research-integrity image-provenance study)"
 contact = "boyd@pldm.ai"
 
-# Conservative, defensible pacing. Real crawl-delay from robots.txt overrides if larger.
-min_interval_seconds = 3.0       # minimum gap between requests to the same host
-jitter_seconds = 1.0             # added random 0..jitter on top of the interval
+# Throughput. The goal is to finish the full ~261K-product catalog (~1M requests incl.
+# images) in well under a day. We run many requests in flight over HTTP/2 with no fixed
+# inter-request delay; measured ~30 req/s at concurrency 48 -> ~9h for the whole catalog
+# (raise -c for ~6h, lower it to be gentler). We still back off on 429/5xx and respect
+# robots.txt — fast is not the same as abusive.
+concurrency = 32                 # max requests in flight at once
+min_interval_seconds = 0.0       # fixed gap between requests to a host (0 = none)
 max_retries = 4                  # on 429 / 5xx / transport errors
-backoff_base_seconds = 2.0       # exponential: base * 2**attempt (+ jitter)
-backoff_max_seconds = 120.0
+backoff_base_seconds = 1.0       # exponential: base * 2**attempt (+ jitter)
+backoff_max_seconds = 60.0
+jitter_seconds = 0.5             # random 0..jitter added to backoff waits
 timeout_seconds = 30.0
 respect_robots = true
 
-[archive]
-# Optional external preservation via the Wayback Machine "Save Page Now" endpoint.
-# OFF by default: it is outward-facing and slow. Enable deliberately for a real run.
-wayback_save_pages = false
-wayback_save_images = false
+# The HTTP cache is OFF by default: for a one-shot full crawl it would duplicate every
+# image and page on disk. Enable only for small incremental/seed runs where re-fetching
+# the same URL twice is the thing you want to avoid.
+cache_enabled = false
 
 [zenodo]
 # The curated set of documented problematic images (labeled positives for phase 2).

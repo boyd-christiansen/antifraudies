@@ -24,25 +24,21 @@ class PathsConfig(BaseModel):
     data_dir: str = "data"
     db_filename: str = "antifraudies.db"
     blobs_subdir: str = "blobs"
-    pages_subdir: str = "pages"
     cache_subdir: str = "cache"
 
 
 class CrawlConfig(BaseModel):
     user_agent: str
     contact: str
-    min_interval_seconds: float = 3.0
-    jitter_seconds: float = 1.0
+    concurrency: int = 24
+    min_interval_seconds: float = 0.0
     max_retries: int = 4
-    backoff_base_seconds: float = 2.0
-    backoff_max_seconds: float = 120.0
+    backoff_base_seconds: float = 1.0
+    backoff_max_seconds: float = 60.0
+    jitter_seconds: float = 0.5
     timeout_seconds: float = 30.0
     respect_robots: bool = True
-
-
-class ArchiveConfig(BaseModel):
-    wayback_save_pages: bool = False
-    wayback_save_images: bool = False
+    cache_enabled: bool = False
 
 
 class ZenodoConfig(BaseModel):
@@ -53,7 +49,6 @@ class ZenodoConfig(BaseModel):
 class Settings(BaseModel):
     paths: PathsConfig
     crawl: CrawlConfig
-    archive: ArchiveConfig
     zenodo: ZenodoConfig
 
     # Absolute path to the repo root, resolved at load time. Not from TOML.
@@ -72,15 +67,11 @@ class Settings(BaseModel):
         return self.data_dir / self.paths.blobs_subdir
 
     @property
-    def pages_dir(self) -> Path:
-        return self.data_dir / self.paths.pages_subdir
-
-    @property
     def cache_dir(self) -> Path:
         return self.data_dir / self.paths.cache_subdir
 
     def ensure_dirs(self) -> None:
-        for d in (self.data_dir, self.blobs_dir, self.pages_dir, self.cache_dir):
+        for d in (self.data_dir, self.blobs_dir, self.cache_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

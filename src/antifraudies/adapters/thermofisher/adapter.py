@@ -7,8 +7,7 @@ from datetime import UTC, datetime
 
 from ...crawl.http import PoliteClient
 from ...crawl.robots import RobotsPolicy
-from ...models import PageSnapshot, ProductRef, ScrapeResult
-from ...store.blobs import sha256_hex
+from ...models import ProductRef, ScrapeResult
 from ..base import VendorAdapter
 from . import enumerate as tf_enumerate
 from .parse import parse_product_page
@@ -54,29 +53,16 @@ class ThermoFisherAdapter(VendorAdapter):
 
         resp = self.client.get(ref.product_url)
         fetched_at = datetime.now(UTC)
-        html = resp.text
 
-        # Snapshot the page as perishable evidence (content-addressed).
-        page_sha = sha256_hex(resp.content)
-        snapshot = PageSnapshot(
-            vendor=self.vendor,
-            url=resp.url or ref.product_url,
-            catalog_number=ref.catalog_number,
-            content_sha256=page_sha,
-            byte_size=len(resp.content),
-            http_status=resp.status_code,
-            fetched_at=fetched_at,
-        )
-
+        # Parse the product metadata + image records out of the page, then discard the HTML
+        # (we don't archive pages — see models.ScrapeResult). The source page is recorded as
+        # the product URL, not stored bytes.
         product, images = parse_product_page(
-            html, catalog_number=ref.catalog_number, product_url=snapshot.url
+            resp.text, catalog_number=ref.catalog_number, product_url=resp.url or ref.product_url
         )
         product.first_seen = fetched_at
         product.last_seen = fetched_at
         for img in images:
             img.http_status = resp.status_code
-            img.source_page_sha256 = page_sha
 
-        return ScrapeResult(
-            product=product, images=images, page_snapshot=snapshot, raw_html=html
-        )
+        return ScrapeResult(product=product, images=images)

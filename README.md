@@ -20,8 +20,8 @@ scale. This project automates the **evidence-gathering and forensic-screening** 
 ## Two-phase plan
 
 **Phase 1 — the scraper (implemented).** Enumerate a vendor's catalog, fetch verification
-images and their metadata, record each image's **provenance**, and persist everything as
-**preserved evidence** in a normalized, cross-image-queryable store.
+images and their metadata, record each image's **provenance**, and persist the image bytes
+and metadata in a normalized, cross-image-queryable store.
 
 **Phase 2 — the forensic pipeline (architected here, not built).** A cost-ordered funnel —
 cheap operations on everything, expensive ones only on what survives — consuming the
@@ -70,28 +70,41 @@ published figure" are entirely different statements.
   (`/antibody/sitemap-AntibodiesIndex.xml` → child product-page sitemaps). The search API is
   `robots.txt`-disallowed and is **not** used.
 
-## Polite, defensible crawling
+## Crawling: fast, but defensible
 
-This work may be published, so the crawl must be above reproach:
+The full antibody catalog is ~261K products (~1M requests including images). We crawl it in
+**well under a day** — measured ~30 requests/s at concurrency 48 → ~9 hours — by running
+many requests in flight over HTTP/2 with no fixed inter-request delay. Fast is not the same
+as abusive:
 
 - honest `User-Agent` token + `From` contact address (we do **not** disguise our identity);
 - `robots.txt` fetched, parsed, and enforced (disallowed paths refused, `crawl-delay` honored);
-- conservative per-host rate limiting with jitter and exponential backoff on 429/5xx;
-- an on-disk HTTP cache so nothing is fetched twice;
-- every capture preserved as evidence: **original bytes, content hash, source URL, provenance,
-  caption, capture timestamp**, plus a full page-HTML snapshot and optional Wayback archival.
+- **adaptive backoff**: exponential backoff with jitter on 429/5xx — if the server signals
+  stress, we yield; concurrency is configurable (`--concurrency`) to dial pressure up or down;
+- we keep, per image: **original bytes + content hash, the source product URL, provenance,
+  caption, application, filename metadata, and capture timestamp**.
 
 > The target sits behind Akamai, which rejects requests lacking realistic `Accept` headers.
 > We send realistic `Accept`/`Accept-Language` headers but keep our identity honest in the UA
-> token. If the honest UA is blocked at scale, that is a human decision to make, not
-> something to silently evade.
+> token. Sustained aggressive crawling may trip edge throttling; the backoff adapts, and
+> concurrency is a knob — how hard to push is a human decision, not something to silently evade.
 
-## Evidence integrity
+## What we keep (and what we don't)
 
-Original bytes and hashes are **never modified after capture**. Raw captures live under
-`data/blobs/` (images) and `data/pages/` (HTML), content-addressed by SHA-256, each image
-with a self-describing JSON sidecar. Derived/processed artifacts (phase 2) live separately,
-never overwriting raw evidence.
+The project's question is *which images are reused or altered, and where* — not archiving
+pages as litigation evidence. So we deliberately keep the data lean:
+
+- **Image bytes** — content-addressed by SHA-256 under `data/blobs/`, **immutable** after
+  capture, and **deduped across the whole catalog** (one image used on N products collapses
+  to a single blob, while each listing keeps its own database row).
+- **Metadata rows** — products and per-image records in SQLite; this is the single source of
+  metadata and the substrate for every cross-image query.
+- We do **not** store raw page HTML or per-image JSON sidecars, and there is no external
+  archival step. (Earlier drafts did; it added ~180 GB of page HTML for no analytic gain.)
+
+Net storage for the full catalog is roughly **~60–80 GB of image bytes + a few GB of SQLite**,
+versus ~250 GB before. Derived/processed artifacts (phase 2) live separately under
+`pipelines/`, never overwriting raw image bytes.
 
 ## Repository layout
 
@@ -99,15 +112,15 @@ never overwriting raw evidence.
 src/antifraudies/      # the package
   models.py            # normalized record schema (shared across phases)
   provenance.py        # provenance taxonomy + classifier
-  store/               # SQLite (normalized records) + content-addressed blob store
-  crawl/               # polite HTTP client, robots enforcement, optional Wayback archival
+  store/               # SQLite (metadata records) + content-addressed image blob store
+  crawl/               # HTTP/2 client (concurrent, adaptive backoff) + robots enforcement
   adapters/            # per-vendor adapters -> one normalized schema (thermofisher first)
-  scrape.py  cli.py    # orchestration + CLI
+  scrape.py  cli.py    # concurrent orchestration + CLI
 reference/zenodo/      # the documented-image set (DOI 10.5281/zenodo.20402475); manifest now, bytes in phase 2
 pipelines/             # PHASE 2 placeholders (documented, empty)
 review/                # PHASE 2 placeholder: human review queue tooling
 seeds/                 # bounded seed lists for first runs
-data/                  # runtime evidence store (gitignored)
+data/                  # runtime store: image blobs + SQLite (gitignored)
 tests/                 # parser / provenance / filename tests against real captured fixtures
 ```
 
@@ -121,8 +134,11 @@ pytest                                                   # offline tests vs real
 # List products from the sitemap (no pages fetched):
 antifraudies enumerate --vendor thermofisher --limit 20
 
-# Scrape a bounded seed politely and preserve evidence:
+# Scrape a bounded seed (image bytes + metadata):
 antifraudies scrape --vendor thermofisher --seed seeds/thermofisher_seed.txt
+
+# Crawl the full catalog concurrently (raise -c to go faster):
+antifraudies scrape --vendor thermofisher --concurrency 48
 
 # Preview the cross-image queries phase 2 builds on:
 antifraudies report --vendor thermofisher

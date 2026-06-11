@@ -1,15 +1,17 @@
-"""A polite, defensible HTTP client.
+"""HTTP client for the crawler.
 
-Design goals, all stated in the project brief as non-negotiable for work we may publish:
+The goal is to scrape a very large catalog quickly — many requests in flight, no fixed
+delay between them — while staying defensible:
   - Identify honestly: a truthful User-Agent token plus a contact address.
-  - Rate-limit conservatively: a minimum gap between requests to the same host, plus
-    jitter; robots.txt crawl-delay overrides if larger.
+  - Send realistic Accept / Accept-Language headers (the target's Akamai edge requires
+    them) without disguising our identity in the UA token.
   - Back off on pushback: exponential backoff with jitter on 429 / 5xx / transport errors.
-  - Cache so nothing is fetched twice: an on-disk cache keyed by method+URL.
+    Being fast is not the same as being abusive — if the server signals stress, we yield.
 
-We DO send realistic Accept / Accept-Language headers (the target sits behind Akamai and
-rejects requests lacking them), but we never disguise our identity in the UA token. If the
-honest UA is blocked at scale that is a human decision, not something to silently evade.
+Concurrency is driven by the orchestrator (a thread pool); a single ``httpx.Client`` is
+shared across threads, which httpx supports. An optional fixed per-host interval and an
+optional on-disk cache remain available for gentle incremental/seed runs, but both default
+off so a full crawl is fast and doesn't duplicate every image on disk.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,12 +55,19 @@ class PoliteClient:
         self.s = settings
         self.cfg = settings.crawl
         self.cache_dir = settings.cache_dir
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if self.cfg.cache_enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
         self._last_request_at: dict[str, float] = {}
         self._host_delay: dict[str, float] = {}  # host -> robots crawl-delay override
         self._client = httpx.Client(
             follow_redirects=True,
+            http2=True,  # multiplex many requests over few connections — big throughput win
             timeout=self.cfg.timeout_seconds,
+            limits=httpx.Limits(
+                max_connections=self.cfg.concurrency + 8,
+                max_keepalive_connections=self.cfg.concurrency + 8,
+            ),
             headers={
                 "User-Agent": self.cfg.user_agent,
                 "From": self.cfg.contact,
@@ -78,25 +88,28 @@ class PoliteClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    # -- politeness controls -------------------------------------------------
+    # -- optional per-host pacing -------------------------------------------
 
     def set_host_crawl_delay(self, host: str, delay: float | None) -> None:
         if delay:
-            self._host_delay[host] = float(delay)
-
-    def _interval_for(self, host: str) -> float:
-        return max(self.cfg.min_interval_seconds, self._host_delay.get(host, 0.0))
+            with self._lock:
+                self._host_delay[host] = float(delay)
 
     def _throttle(self, host: str) -> None:
-        interval = self._interval_for(host)
-        last = self._last_request_at.get(host)
-        if last is not None:
-            wait = interval - (time.monotonic() - last)
-            if wait > 0:
-                time.sleep(wait + random.uniform(0, self.cfg.jitter_seconds))
-        self._last_request_at[host] = time.monotonic()
+        """Enforce an optional fixed gap between requests to a host. No-op by default
+        (min_interval_seconds = 0), which is the full-crawl case."""
+        interval = max(self.cfg.min_interval_seconds, self._host_delay.get(host, 0.0))
+        if interval <= 0:
+            return
+        with self._lock:
+            last = self._last_request_at.get(host)
+            now = time.monotonic()
+            wait = 0.0 if last is None else interval - (now - last)
+            self._last_request_at[host] = now + max(wait, 0.0)
+        if wait > 0:
+            time.sleep(wait)
 
-    # -- cache ---------------------------------------------------------------
+    # -- cache (optional) ----------------------------------------------------
 
     def _cache_path(self, method: str, url: str) -> Path:
         key = hashlib.sha256(f"{method} {url}".encode()).hexdigest()
@@ -107,11 +120,10 @@ class PoliteClient:
         if not path.exists():
             return None
         blob = json.loads(path.read_text(encoding="utf-8"))
-        content = bytes.fromhex(blob["content_hex"])
         return CachedResponse(
             url=blob["url"],
             status_code=blob["status_code"],
-            content=content,
+            content=bytes.fromhex(blob["content_hex"]),
             headers=blob["headers"],
             from_cache=True,
         )
@@ -119,7 +131,8 @@ class PoliteClient:
     def _write_cache(self, method: str, url: str, resp: CachedResponse) -> None:
         path = self._cache_path(method, url)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(
                 {
                     "url": resp.url,
@@ -130,11 +143,13 @@ class PoliteClient:
             ),
             encoding="utf-8",
         )
+        tmp.rename(path)
 
     # -- request -------------------------------------------------------------
 
-    def get(self, url: str, use_cache: bool = True) -> CachedResponse:
-        """GET with caching, rate limiting and backoff. Cached results skip the network."""
+    def get(self, url: str, use_cache: bool | None = None) -> CachedResponse:
+        """GET with backoff and optional caching/pacing. Safe to call from many threads."""
+        use_cache = self.cfg.cache_enabled if use_cache is None else use_cache
         if use_cache:
             cached = self._read_cache("GET", url)
             if cached is not None:
@@ -161,8 +176,6 @@ class PoliteClient:
                 self._backoff(attempt, retry_after=resp.headers.get("retry-after"))
                 continue
 
-            # Cache any definitive (non-retryable) response, including 4xx, so we don't
-            # hammer a URL that reliably fails.
             if use_cache:
                 self._write_cache("GET", url, resp)
             return resp
