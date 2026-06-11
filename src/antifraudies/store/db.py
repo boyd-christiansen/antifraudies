@@ -1,41 +1,57 @@
-"""SQLite access layer for the normalized evidence store.
+"""PostgreSQL access layer for the normalized store (psycopg3 + pgvector).
 
-Holds the queryable records and a few cross-image query helpers that demonstrate the
-whole-corpus comparisons phase 2 will build on (e.g. "which images share a content
-hash" or "which unrelated products share an image filename timestamp"). Upserts are
-idempotent so re-scraping a product never duplicates rows.
+Holds the queryable records, derived features (incl. embeddings), and findings. A few
+cross-image query helpers demonstrate the whole-corpus comparisons phase 2 builds on.
+Upserts are idempotent so re-scraping a product never duplicates rows. SQLite was the
+phase-1 store; we moved to Postgres+pgvector now to avoid a migration once embeddings and
+ANN search arrive in phase 2.
 """
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from pathlib import Path
+
+import psycopg
+from pgvector.psycopg import register_vector
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from ..models import Product, VerificationImage
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
+def _split_statements(sql: str) -> list[str]:
+    """Split a DDL script into statements. Strip ``--`` comments FIRST (they may contain ';'),
+    then split on ';'. Safe here: our DDL has no string literals containing '--' or ';'."""
+    stripped = []
+    for line in sql.splitlines():
+        idx = line.find("--")
+        stripped.append(line if idx < 0 else line[:idx])
+    return [s.strip() for s in "\n".join(stripped).split(";") if s.strip()]
+
+
 class Database:
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        self.conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+        register_vector(self.conn)
         self._init_schema()
 
     def _init_schema(self) -> None:
-        self.conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        with self.conn.cursor() as cur:
+            for stmt in _split_statements(SCHEMA_PATH.read_text(encoding="utf-8")):
+                cur.execute(stmt)
         self.conn.commit()
 
     def commit(self) -> None:
         self.conn.commit()
 
     def close(self) -> None:
-        self.conn.commit()
-        self.conn.close()
+        try:
+            self.conn.commit()
+        finally:
+            self.conn.close()
 
     def __enter__(self) -> Database:
         return self
@@ -51,19 +67,18 @@ class Database:
             INSERT INTO products
                 (vendor, catalog_number, product_url, product_name, target, clone, rrid,
                  first_seen, last_seen)
-            VALUES (:vendor, :catalog_number, :product_url, :product_name, :target, :clone,
-                    :rrid, :first_seen, :last_seen)
-            ON CONFLICT(vendor, catalog_number) DO UPDATE SET
-                product_url  = excluded.product_url,
-                product_name = COALESCE(excluded.product_name, products.product_name),
-                target       = COALESCE(excluded.target, products.target),
-                clone        = COALESCE(excluded.clone, products.clone),
-                rrid         = COALESCE(excluded.rrid, products.rrid),
-                -- keep the EARLIEST first_seen, advance last_seen
-                first_seen   = MIN(COALESCE(products.first_seen, excluded.first_seen),
-                                   COALESCE(excluded.first_seen, products.first_seen)),
-                last_seen    = MAX(COALESCE(products.last_seen, excluded.last_seen),
-                                   COALESCE(excluded.last_seen, products.last_seen))
+            VALUES (%(vendor)s, %(catalog_number)s, %(product_url)s, %(product_name)s,
+                    %(target)s, %(clone)s, %(rrid)s, %(first_seen)s, %(last_seen)s)
+            ON CONFLICT (vendor, catalog_number) DO UPDATE SET
+                product_url  = EXCLUDED.product_url,
+                product_name = COALESCE(EXCLUDED.product_name, products.product_name),
+                target       = COALESCE(EXCLUDED.target, products.target),
+                clone        = COALESCE(EXCLUDED.clone, products.clone),
+                rrid         = COALESCE(EXCLUDED.rrid, products.rrid),
+                first_seen   = LEAST(COALESCE(products.first_seen, EXCLUDED.first_seen),
+                                     COALESCE(EXCLUDED.first_seen, products.first_seen)),
+                last_seen    = GREATEST(COALESCE(products.last_seen, EXCLUDED.last_seen),
+                                        COALESCE(EXCLUDED.last_seen, products.last_seen))
             """,
             {
                 "vendor": p.vendor,
@@ -73,8 +88,8 @@ class Database:
                 "target": p.target,
                 "clone": p.clone,
                 "rrid": p.rrid,
-                "first_seen": _iso(p.first_seen),
-                "last_seen": _iso(p.last_seen),
+                "first_seen": p.first_seen,
+                "last_seen": p.last_seen,
             },
         )
 
@@ -91,29 +106,30 @@ class Database:
                  fn_timestamp, fn_pubmed_id, content_sha256, byte_size, content_type,
                  http_status, captured_at)
             VALUES
-                (:vendor, :catalog_number, :vendor_image_id, :provenance,
-                 :provenance_disagreement, :source_type_raw, :modality, :modality_confidence,
-                 :application_abbrev, :application_name, :caption, :short_caption, :title,
-                 :alt_tag, :journal_text, :benchsci_pubmed_id, :image_filename,
-                 :image_url_full, :image_url_variants, :fn_catalog, :fn_target,
-                 :fn_application, :fn_av_marker, :fn_timestamp, :fn_pubmed_id,
-                 :content_sha256, :byte_size, :content_type, :http_status, :captured_at)
-            ON CONFLICT(vendor, catalog_number, image_filename) DO UPDATE SET
-                vendor_image_id         = excluded.vendor_image_id,
-                provenance              = excluded.provenance,
-                provenance_disagreement = excluded.provenance_disagreement,
-                source_type_raw         = excluded.source_type_raw,
-                modality                = excluded.modality,
-                modality_confidence     = excluded.modality_confidence,
-                caption                 = excluded.caption,
-                content_sha256          = COALESCE(excluded.content_sha256,
+                (%(vendor)s, %(catalog_number)s, %(vendor_image_id)s, %(provenance)s,
+                 %(provenance_disagreement)s, %(source_type_raw)s, %(modality)s,
+                 %(modality_confidence)s, %(application_abbrev)s, %(application_name)s,
+                 %(caption)s, %(short_caption)s, %(title)s, %(alt_tag)s, %(journal_text)s,
+                 %(benchsci_pubmed_id)s, %(image_filename)s, %(image_url_full)s,
+                 %(image_url_variants)s, %(fn_catalog)s, %(fn_target)s, %(fn_application)s,
+                 %(fn_av_marker)s, %(fn_timestamp)s, %(fn_pubmed_id)s, %(content_sha256)s,
+                 %(byte_size)s, %(content_type)s, %(http_status)s, %(captured_at)s)
+            ON CONFLICT (vendor, catalog_number, image_filename) DO UPDATE SET
+                vendor_image_id         = EXCLUDED.vendor_image_id,
+                provenance              = EXCLUDED.provenance,
+                provenance_disagreement = EXCLUDED.provenance_disagreement,
+                source_type_raw         = EXCLUDED.source_type_raw,
+                modality                = EXCLUDED.modality,
+                modality_confidence     = EXCLUDED.modality_confidence,
+                caption                 = EXCLUDED.caption,
+                content_sha256          = COALESCE(EXCLUDED.content_sha256,
                                                    verification_images.content_sha256),
-                byte_size               = COALESCE(excluded.byte_size,
+                byte_size               = COALESCE(EXCLUDED.byte_size,
                                                    verification_images.byte_size),
-                content_type            = COALESCE(excluded.content_type,
+                content_type            = COALESCE(EXCLUDED.content_type,
                                                    verification_images.content_type),
-                http_status             = excluded.http_status,
-                captured_at             = COALESCE(excluded.captured_at,
+                http_status             = EXCLUDED.http_status,
+                captured_at             = COALESCE(EXCLUDED.captured_at,
                                                    verification_images.captured_at)
             """,
             {
@@ -135,7 +151,7 @@ class Database:
                 "benchsci_pubmed_id": img.benchsci_pubmed_id,
                 "image_filename": img.image_filename,
                 "image_url_full": img.image_url_full,
-                "image_url_variants": json.dumps(img.image_url_variants),
+                "image_url_variants": Jsonb(img.image_url_variants),
                 "fn_catalog": fn.catalog_token if fn else None,
                 "fn_target": fn.target_token if fn else None,
                 "fn_application": fn.application_token if fn else None,
@@ -146,7 +162,7 @@ class Database:
                 "byte_size": img.byte_size,
                 "content_type": img.content_type,
                 "http_status": img.http_status,
-                "captured_at": _iso(img.captured_at),
+                "captured_at": img.captured_at,
             },
         )
 
@@ -155,14 +171,14 @@ class Database:
     def count_images(self, provenance: str | None = None) -> int:
         if provenance:
             row = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM verification_images WHERE provenance = ?",
+                "SELECT COUNT(*) AS n FROM verification_images WHERE provenance = %s",
                 (provenance,),
             ).fetchone()
         else:
             row = self.conn.execute("SELECT COUNT(*) AS n FROM verification_images").fetchone()
         return row["n"]
 
-    def modality_matrix(self) -> list[sqlite3.Row]:
+    def modality_matrix(self) -> list[dict]:
         """Counts by provenance x rendered modality — sizes each forensic stream."""
         return self.conn.execute(
             """
@@ -173,27 +189,29 @@ class Database:
             """
         ).fetchall()
 
-    def images_sharing_content(self) -> list[sqlite3.Row]:
+    def images_sharing_content(self) -> list[dict]:
         """Cross-image: content hashes that appear on more than one product (whole-image
-        reuse). A phase-2 building block, demonstrated here on phase-1 data."""
+        reuse)."""
         return self.conn.execute(
             """
             SELECT content_sha256,
                    COUNT(DISTINCT catalog_number) AS n_products,
-                   GROUP_CONCAT(DISTINCT catalog_number) AS products
+                   string_agg(DISTINCT catalog_number, ',') AS products
             FROM verification_images
             WHERE content_sha256 IS NOT NULL
             GROUP BY content_sha256
-            HAVING n_products > 1
+            HAVING COUNT(DISTINCT catalog_number) > 1
             ORDER BY n_products DESC
             """
         ).fetchall()
 
-    def images_sharing_timestamp(self, internal_only: bool = True) -> list[sqlite3.Row]:
+    def images_sharing_timestamp(self, internal_only: bool = True) -> list[dict]:
         """Cross-image: filename timestamps shared across unrelated products."""
-        where = "fn_timestamp IS NOT NULL AND fn_timestamp != ''"
+        where = "fn_timestamp IS NOT NULL AND fn_timestamp <> ''"
+        params: list[str] = []
         if internal_only:
-            where += " AND provenance LIKE 'internal_%'"
+            where += " AND provenance LIKE %s"
+            params.append("internal%")  # LIKE wildcard inside a parameter value
         return self.conn.execute(
             f"""
             SELECT fn_timestamp,
@@ -202,11 +220,8 @@ class Database:
             FROM verification_images
             WHERE {where}
             GROUP BY fn_timestamp
-            HAVING n_products > 1
+            HAVING COUNT(DISTINCT catalog_number) > 1
             ORDER BY n_products DESC
-            """
+            """,
+            params,
         ).fetchall()
-
-
-def _iso(value) -> str | None:
-    return value.isoformat() if value is not None else None

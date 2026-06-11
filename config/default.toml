@@ -3,11 +3,15 @@
 # "__" as the nesting delimiter, e.g. ANTIFRAUDIES_CRAWL__CONCURRENCY=32
 
 [paths]
-# All runtime data lives under data_dir (gitignored). Image bytes are immutable.
+# Image bytes live on disk (immutable, content-addressed); metadata/features live in Postgres.
 data_dir = "data"
-db_filename = "antifraudies.db"
 blobs_subdir = "blobs"       # content-addressed image bytes (deduped across the whole catalog)
 cache_subdir = "cache"       # on-disk HTTP cache (small things only; see cache_enabled)
+
+[database]
+# PostgreSQL + pgvector. libpq DSN; default connects locally as the current user.
+# Override with ANTIFRAUDIES_DATABASE__DSN=postgresql://user:pass@host:5432/antifraudies
+dsn = "postgresql:///antifraudies"
 
 [crawl]
 # Honest identification: a truthful UA token plus a contact. We send realistic Accept

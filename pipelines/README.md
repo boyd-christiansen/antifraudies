@@ -1,9 +1,16 @@
-# Phase 2 — forensic pipelines (placeholder, NOT implemented)
+# Phase 2 — forensic pipelines (design home)
 
 > [!IMPORTANT]
-> Nothing in this directory is implemented yet. These are documented placeholders so the
-> phase-2 expansion is obvious and low-friction. **No image processing exists in phase 1.**
-> Phase 2 surfaces *apparent* anomalies for human review; it never renders a verdict.
+> This directory documents the phase-2 **design** (the cost-ordered funnel below). The
+> runnable detector code lives in the package at `src/antifraudies/detect/` so it can import
+> the store and be tested. Phase 2 surfaces *apparent* anomalies for human review; it never
+> renders a verdict.
+>
+> **Built so far:** Tier 0 — `metadata_reuse`, `whole_image_reuse` (`detect/tier0.py`);
+> Tier 1 — image features + `near_duplicate` (`detect/features.py`, `detect/tier1.py`).
+> Findings land in the `findings` table; run with `antifraudies detect --tier all`.
+> **Next:** pgvector embeddings + ANN, then Tiers 2–3 (segmentation, band matching, learned
+> splice/inpaint), then scoring/review.
 
 Phase 2 is a **cost-ordered funnel**: cheap operations run on the whole corpus, expensive
 operations run only on what survives upstream filtering. Every stage reads from and writes

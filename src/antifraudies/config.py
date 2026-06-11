@@ -22,9 +22,13 @@ ENV_PREFIX = "ANTIFRAUDIES_"
 
 class PathsConfig(BaseModel):
     data_dir: str = "data"
-    db_filename: str = "antifraudies.db"
     blobs_subdir: str = "blobs"
     cache_subdir: str = "cache"
+
+
+class DatabaseConfig(BaseModel):
+    # libpq DSN. Default connects to a local Postgres as the current user.
+    dsn: str = "postgresql:///antifraudies"
 
 
 class CrawlConfig(BaseModel):
@@ -48,6 +52,7 @@ class ZenodoConfig(BaseModel):
 
 class Settings(BaseModel):
     paths: PathsConfig
+    database: DatabaseConfig = DatabaseConfig()
     crawl: CrawlConfig
     zenodo: ZenodoConfig
 
@@ -57,10 +62,6 @@ class Settings(BaseModel):
     @property
     def data_dir(self) -> Path:
         return (self.repo_root / self.paths.data_dir).resolve()
-
-    @property
-    def db_path(self) -> Path:
-        return self.data_dir / self.paths.db_filename
 
     @property
     def blobs_dir(self) -> Path:

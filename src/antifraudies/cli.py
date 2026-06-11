@@ -36,7 +36,7 @@ def _build(vendor: str, concurrency: int | None = None):
     client = PoliteClient(settings)
     robots = RobotsPolicy(client, settings.crawl.user_agent) if settings.crawl.respect_robots else None
     adapter = ADAPTERS[vendor](client, robots)
-    db = Database(settings.db_path)
+    db = Database(settings.database.dsn)
     return settings, client, adapter, db
 
 
@@ -116,6 +116,60 @@ def report(vendor: str = typer.Option("thermofisher", "--vendor", "-v")) -> None
             typer.echo(f"  {row['fn_timestamp']}  {row['n_products']} products / {row['n_images']} images")
     finally:
         client.close()
+        db.close()
+
+
+@app.command()
+def detect(
+    tier: str = typer.Option("0", "--tier", "-t", help="Which tier(s) to run: 0, 1, or all."),
+) -> None:
+    """Run forensic detectors over the stored corpus, writing rows into `findings`."""
+    from .detect import tier0
+
+    settings = get_settings()
+    db = Database(settings.database.dsn)
+    try:
+        if tier in {"0", "all"}:
+            counts = tier0.run_all(db)
+            for name, n in counts.items():
+                typer.echo(f"tier0.{name:20s} {n} findings")
+        if tier in {"1", "all"}:
+            from .detect import tier1
+
+            counts = tier1.run_all(db)
+            for name, n in counts.items():
+                typer.echo(f"tier1.{name:20s} {n} findings")
+    finally:
+        db.close()
+
+
+@app.command()
+def findings(
+    limit: int = typer.Option(25, "--limit", "-n"),
+    finding_type: str = typer.Option(None, "--type", help="Filter by finding_type."),
+) -> None:
+    """List top findings by score (apparent anomalies flagged for human review)."""
+    settings = get_settings()
+    db = Database(settings.database.dsn)
+    try:
+        where = "WHERE finding_type = %s" if finding_type else ""
+        params = (finding_type,) if finding_type else ()
+        rows = db.conn.execute(
+            f"""
+            SELECT finding_type, severity, n_products, provenance_pair, finding_key, detail
+            FROM findings {where}
+            ORDER BY score DESC, n_products DESC
+            LIMIT {int(limit)}
+            """,
+            params,
+        ).fetchall()
+        typer.echo(f"{'type':20s} {'sev':7s} {'prods':5s} {'provenance':22s} key")
+        for r in rows:
+            typer.echo(
+                f"{r['finding_type']:20s} {r['severity'] or '':7s} {r['n_products'] or 0:5d} "
+                f"{r['provenance_pair'] or '':22s} {r['finding_key']}"
+            )
+    finally:
         db.close()
 
 

@@ -54,3 +54,13 @@ class BlobStore:
 
     def exists(self, digest: str, ext: str = "bin") -> bool:
         return self._path_for(digest, ext).exists()
+
+    def find(self, digest: str) -> Path | None:
+        """Locate a stored blob by digest regardless of extension (jpg/png/...)."""
+        shard = self.root / digest[:2]
+        if not shard.is_dir():
+            return None
+        for p in shard.glob(f"{digest}.*"):
+            if not p.name.endswith(".tmp"):
+                return p
+        return None

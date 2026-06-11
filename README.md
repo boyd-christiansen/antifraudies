@@ -117,14 +117,15 @@ pages as litigation evidence. So we deliberately keep the data lean:
 - **Image bytes** — content-addressed by SHA-256 under `data/blobs/`, **immutable** after
   capture, and **deduped across the whole catalog** (one image used on N products collapses
   to a single blob, while each listing keeps its own database row).
-- **Metadata rows** — products and per-image records in SQLite; this is the single source of
-  metadata and the substrate for every cross-image query.
+- **Metadata + derived data** — products, per-image records, derived features (incl.
+  pgvector embeddings), and findings live in **PostgreSQL + pgvector**. This is the single
+  source of metadata and the substrate for every cross-image query and phase-2 detector.
 - We do **not** store raw page HTML or per-image JSON sidecars, and there is no external
   archival step. (Earlier drafts did; it added ~180 GB of page HTML for no analytic gain.)
 
-Net storage for the full catalog is roughly **~60–80 GB of image bytes + a few GB of SQLite**,
-versus ~250 GB before. Derived/processed artifacts (phase 2) live separately under
-`pipelines/`, never overwriting raw image bytes.
+Net storage for the full catalog is roughly **~60–80 GB of image bytes + a few GB of
+Postgres**, versus ~250 GB before. Derived/processed artifacts live in the DB and (for
+images) `data/`, never overwriting raw image bytes.
 
 ## Repository layout
 
@@ -132,41 +133,50 @@ versus ~250 GB before. Derived/processed artifacts (phase 2) live separately und
 src/antifraudies/      # the package
   models.py            # normalized record schema (shared across phases)
   provenance.py        # provenance taxonomy + classifier
-  store/               # SQLite (metadata records) + content-addressed image blob store
+  store/               # Postgres+pgvector store (db.py, schema.sql) + image blob store
   crawl/               # HTTP/2 client (concurrent, adaptive backoff) + robots enforcement
   adapters/            # per-vendor adapters -> one normalized schema (thermofisher first)
-  scrape.py  cli.py    # concurrent orchestration + CLI
+  detect/              # phase-2 detectors: tier0 (metadata/exact reuse), tier1 (features, near-dup)
+  scrape.py  cli.py    # concurrent orchestration + CLI (scrape / detect / findings / report)
 reference/zenodo/      # the documented-image set (DOI 10.5281/zenodo.20402475); manifest now, bytes in phase 2
-pipelines/             # PHASE 2 placeholders (documented, empty)
+pipelines/             # phase-2 design home (the cost-ordered funnel); runnable code is in detect/
 review/                # PHASE 2 placeholder: human review queue tooling
 seeds/                 # bounded seed lists for first runs
-data/                  # runtime store: image blobs + SQLite (gitignored)
-tests/                 # parser / provenance / filename tests against real captured fixtures
+data/                  # runtime: content-addressed image blobs + HTTP cache (gitignored)
+tests/                 # parser / provenance / modality / detector tests against real fixtures
 ```
 
 ## Quickstart
 
 ```bash
+# Postgres + pgvector (once). On macOS:
+brew install postgresql@17 pgvector && brew services start postgresql@17
+createdb antifraudies && psql -d antifraudies -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 pytest                                                   # offline tests vs real fixtures
 
-# List products from the sitemap (no pages fetched):
-antifraudies enumerate --vendor thermofisher --limit 20
+# Scrape a small sample (image bytes + metadata) into Postgres:
+antifraudies scrape --vendor thermofisher --limit 250 --concurrency 48
 
-# Scrape a bounded seed (image bytes + metadata):
-antifraudies scrape --vendor thermofisher --seed seeds/thermofisher_seed.txt
+# Run the phase-2 detectors (Tier 0 = metadata/exact reuse; Tier 1 = features + near-dup):
+antifraudies detect --tier all
 
-# Crawl the full catalog concurrently (raise -c to go faster):
-antifraudies scrape --vendor thermofisher --concurrency 48
-
-# Preview the cross-image queries phase 2 builds on:
+# List the ranked findings (apparent anomalies flagged for review):
+antifraudies findings --type near_duplicate
 antifraudies report --vendor thermofisher
 ```
 
-Configuration lives in `config/default.toml` (override via `ANTIFRAUDIES_*` env vars).
+Configuration lives in `config/default.toml` (override via `ANTIFRAUDIES_*` env vars);
+the DB DSN is `ANTIFRAUDIES_DATABASE__DSN`.
 
 ## Status
 
-Phase 1 (scraper) is implemented for Thermo Fisher. Phase 2 (image processing) is
-**architected but intentionally not implemented** — see `pipelines/README.md`.
+Phase 1 (scraper) is implemented for Thermo Fisher. Phase 2 has begun: the store is on
+**Postgres + pgvector**, and **Tier 0** (metadata/exact-image reuse) and **Tier 1**
+(image features + perceptual-hash near-duplicate) detectors run and write to `findings`
+(`src/antifraudies/detect/`). On a 250-product sample these already surface
+background-template reuse — one Western-blot background near-duplicated across 17 unrelated
+products, corroborated by a shared filename timestamp. Embeddings (pgvector ANN) and Tiers
+2–3 (segmentation, band matching, learned splice/inpaint) are next — see `pipelines/README.md`.
