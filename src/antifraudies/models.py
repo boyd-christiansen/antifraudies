@@ -15,6 +15,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from .modality import Modality
 from .provenance import Provenance
 
 
@@ -54,6 +55,11 @@ class VerificationImage(BaseModel):
     provenance: Provenance
     provenance_disagreement: str | None = None  # set when classification signals conflicted
     source_type_raw: str | None = None  # the vendor's raw code, kept verbatim
+
+    # Rendered modality — which forensics apply (separate axis from the assay/application).
+    # Metadata-prior classification; low confidence flags images for an image-feature/VLM look.
+    modality: Modality = Modality.UNKNOWN
+    modality_confidence: str | None = None
 
     # Vendor-supplied descriptive metadata
     application_abbrev: str | None = None  # e.g. "WB"

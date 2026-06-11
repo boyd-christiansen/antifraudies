@@ -54,6 +54,26 @@ Internal data (the vendor's own) and third-party published figures are **tracked
 separately and never conflated**: "the vendor fabricated this" and "the vendor reused a
 published figure" are entirely different statements.
 
+## Three independent axes (not one label)
+
+An image's **assay** (`application`: WB, IHC, Flow…), its **rendered modality**, and its
+**provenance** are independent — and only the *rendered modality* decides which forensics
+apply. A "WB" entry may be a photographic blot OR a bar chart quantifying it; "ChIP" may be
+a gel or a microplate graph. So each image is also tagged with a `modality`:
+
+| modality | examples | forensics that apply |
+|---|---|---|
+| `blot_gel` | Western blot, KD/KO/treatment westerns | **primary target**: band segmentation + cross-catalog matching, background reuse, copy-move, splice |
+| `microscopy` | ICC/IF, IHC | copy-move, splice, reuse (no band extraction) |
+| `plot_chart` | flow histograms, relative-expression bars, qPCR | **whole-image reuse only** — rendered from data, no pixel-band forensics |
+| `composite_panel` | multi-panel paper figures | split into sub-panels, then route each |
+
+Classification is a cheap **metadata prior** (`appAbv` + caption keywords) that tags the
+whole catalog for free; a later image-feature pass and a VLM on the ambiguous tail confirm
+it. `modality_confidence` marks the images that need that second look. So the pipeline is
+*route-by-modality, then run only the applicable detectors* — e.g. the internal `blot_gel`
+images are the high-value band-forensics corpus; charts get near-dup only.
+
 ## How Thermo Fisher serves the data (confirmed)
 
 - **Data is server-rendered into the product-page HTML** as an Angular `tfs-media-gallery`

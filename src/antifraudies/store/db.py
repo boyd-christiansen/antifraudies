@@ -84,25 +84,27 @@ class Database:
             """
             INSERT INTO verification_images
                 (vendor, catalog_number, vendor_image_id, provenance,
-                 provenance_disagreement, source_type_raw, application_abbrev,
-                 application_name, caption, short_caption, title, alt_tag, journal_text,
-                 benchsci_pubmed_id, image_filename, image_url_full, image_url_variants,
-                 fn_catalog, fn_target, fn_application, fn_av_marker, fn_timestamp,
-                 fn_pubmed_id, content_sha256, byte_size, content_type, http_status,
-                 captured_at)
+                 provenance_disagreement, source_type_raw, modality, modality_confidence,
+                 application_abbrev, application_name, caption, short_caption, title,
+                 alt_tag, journal_text, benchsci_pubmed_id, image_filename, image_url_full,
+                 image_url_variants, fn_catalog, fn_target, fn_application, fn_av_marker,
+                 fn_timestamp, fn_pubmed_id, content_sha256, byte_size, content_type,
+                 http_status, captured_at)
             VALUES
                 (:vendor, :catalog_number, :vendor_image_id, :provenance,
-                 :provenance_disagreement, :source_type_raw, :application_abbrev,
-                 :application_name, :caption, :short_caption, :title, :alt_tag,
-                 :journal_text, :benchsci_pubmed_id, :image_filename, :image_url_full,
-                 :image_url_variants, :fn_catalog, :fn_target, :fn_application,
-                 :fn_av_marker, :fn_timestamp, :fn_pubmed_id, :content_sha256, :byte_size,
-                 :content_type, :http_status, :captured_at)
+                 :provenance_disagreement, :source_type_raw, :modality, :modality_confidence,
+                 :application_abbrev, :application_name, :caption, :short_caption, :title,
+                 :alt_tag, :journal_text, :benchsci_pubmed_id, :image_filename,
+                 :image_url_full, :image_url_variants, :fn_catalog, :fn_target,
+                 :fn_application, :fn_av_marker, :fn_timestamp, :fn_pubmed_id,
+                 :content_sha256, :byte_size, :content_type, :http_status, :captured_at)
             ON CONFLICT(vendor, catalog_number, image_filename) DO UPDATE SET
                 vendor_image_id         = excluded.vendor_image_id,
                 provenance              = excluded.provenance,
                 provenance_disagreement = excluded.provenance_disagreement,
                 source_type_raw         = excluded.source_type_raw,
+                modality                = excluded.modality,
+                modality_confidence     = excluded.modality_confidence,
                 caption                 = excluded.caption,
                 content_sha256          = COALESCE(excluded.content_sha256,
                                                    verification_images.content_sha256),
@@ -121,6 +123,8 @@ class Database:
                 "provenance": img.provenance.value,
                 "provenance_disagreement": img.provenance_disagreement,
                 "source_type_raw": img.source_type_raw,
+                "modality": img.modality.value,
+                "modality_confidence": img.modality_confidence,
                 "application_abbrev": img.application_abbrev,
                 "application_name": img.application_name,
                 "caption": img.caption,
@@ -157,6 +161,17 @@ class Database:
         else:
             row = self.conn.execute("SELECT COUNT(*) AS n FROM verification_images").fetchone()
         return row["n"]
+
+    def modality_matrix(self) -> list[sqlite3.Row]:
+        """Counts by provenance x rendered modality — sizes each forensic stream."""
+        return self.conn.execute(
+            """
+            SELECT provenance, modality, COUNT(*) AS n
+            FROM verification_images
+            GROUP BY provenance, modality
+            ORDER BY provenance, n DESC
+            """
+        ).fetchall()
 
     def images_sharing_content(self) -> list[sqlite3.Row]:
         """Cross-image: content hashes that appear on more than one product (whole-image

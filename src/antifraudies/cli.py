@@ -101,6 +101,10 @@ def report(vendor: str = typer.Option("thermofisher", "--vendor", "-v")) -> None
         ):
             typer.echo(f"  {prov:38s} {db.count_images(prov)}")
 
+        typer.echo("\nprovenance x rendered modality (which forensics apply):")
+        for row in db.modality_matrix():
+            typer.echo(f"  {row['provenance']:32s} {str(row['modality']):16s} {row['n']}")
+
         shared = db.images_sharing_content()
         typer.echo(f"\nimages reused across products (same content hash): {len(shared)}")
         for row in shared[:20]:

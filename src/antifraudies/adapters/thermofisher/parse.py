@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 
+from ...modality import classify_modality
 from ...models import Product, VerificationImage
 from ...provenance import Provenance, classify_thermofisher
 from .filenames import parse_filename
@@ -109,6 +110,11 @@ def record_to_image(
         benchsci_pubmed_id=benchsci_pmid,
         image_filename=image_name,
     )
+    mod = classify_modality(
+        application_abbrev=_str_or_none(rec.get("appAbv")),
+        application_name=_str_or_none(rec.get("appName")),
+        caption=_str_or_none(rec.get("description")),
+    )
 
     variants = {
         size: rec[key]
@@ -128,6 +134,8 @@ def record_to_image(
         provenance=prov.provenance,
         provenance_disagreement=prov.disagreement,
         source_type_raw=_str_or_none(rec.get("sourceType")),
+        modality=mod.modality,
+        modality_confidence=mod.confidence,
         application_abbrev=_str_or_none(rec.get("appAbv")),
         application_name=_str_or_none(rec.get("appName")),
         caption=_str_or_none(rec.get("description")),

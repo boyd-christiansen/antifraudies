@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS verification_images (
     provenance_disagreement TEXT,
     source_type_raw         TEXT,
 
+    -- Rendered modality (blot_gel / microscopy / plot_chart / composite_panel / unknown):
+    -- determines which forensics apply. Separate axis from the assay/application below.
+    modality                TEXT,
+    modality_confidence     TEXT,
+
     -- Vendor descriptive metadata
     application_abbrev      TEXT,
     application_name        TEXT,
@@ -76,5 +81,6 @@ CREATE TABLE IF NOT EXISTS verification_images (
 CREATE INDEX IF NOT EXISTS idx_images_content_sha   ON verification_images(content_sha256); -- whole-image reuse
 CREATE INDEX IF NOT EXISTS idx_images_fn_timestamp  ON verification_images(fn_timestamp);   -- shared-timestamp tell
 CREATE INDEX IF NOT EXISTS idx_images_provenance    ON verification_images(provenance);     -- partition by provenance
+CREATE INDEX IF NOT EXISTS idx_images_modality      ON verification_images(modality);        -- route by rendered modality
 CREATE INDEX IF NOT EXISTS idx_images_pubmed        ON verification_images(benchsci_pubmed_id);
 CREATE INDEX IF NOT EXISTS idx_images_catalog       ON verification_images(vendor, catalog_number);
