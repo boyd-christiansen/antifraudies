@@ -168,6 +168,14 @@ class Database:
 
     # ------------------------------------------------------------------ reads
 
+    def scraped_catalogs(self, vendor: str) -> set[str]:
+        """Catalog numbers already scraped for a vendor — used by `scrape --resume` to skip
+        them, so a long crawl can be re-run without restarting from the top."""
+        rows = self.conn.execute(
+            "SELECT catalog_number FROM products WHERE vendor = %s", (vendor,)
+        ).fetchall()
+        return {r["catalog_number"] for r in rows}
+
     def count_images(self, provenance: str | None = None) -> int:
         if provenance:
             row = self.conn.execute(

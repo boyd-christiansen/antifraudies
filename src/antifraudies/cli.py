@@ -62,6 +62,7 @@ def scrape(
     limit: int = typer.Option(None, "--limit", "-n", help="Cap products when crawling the sitemap."),
     concurrency: int = typer.Option(None, "--concurrency", "-c", help="Max requests in flight (overrides config)."),
     no_images: bool = typer.Option(False, "--no-images", help="Record metadata but skip image bytes."),
+    resume: bool = typer.Option(False, "--resume", help="Skip products already in the DB (safe to re-run a long crawl)."),
 ) -> None:
     """Scrape products: fetch pages concurrently, store image bytes + metadata rows."""
     settings, client, adapter, db = _build(vendor, concurrency=concurrency)
@@ -70,6 +71,10 @@ def scrape(
             refs = adapter.seed(iter_seed_file(seed))
         else:
             refs = adapter.enumerate(limit=limit)
+        if resume:
+            done = db.scraped_catalogs(vendor)
+            typer.echo(f"resume: skipping {len(done)} already-scraped products")
+            refs = (r for r in refs if r.catalog_number not in done)
         orch = ScrapeOrchestrator(settings, client, adapter, db)
         summary = orch.run(refs, download_images=not no_images)
     finally:

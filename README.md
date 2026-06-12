@@ -168,8 +168,34 @@ antifraudies findings --type near_duplicate
 antifraudies report --vendor thermofisher
 ```
 
-Configuration lives in `config/default.toml` (override via `ANTIFRAUDIES_*` env vars);
-the DB DSN is `ANTIFRAUDIES_DATABASE__DSN`.
+Configuration lives in `config/default.toml` (override via `ANTIFRAUDIES_*` env vars).
+
+## Storage configuration (where the data goes)
+
+Two stores, two knobs — set these to relocate storage when you clone the repo:
+
+| What | Size (full catalog) | Env var | Default |
+|---|---|---|---|
+| **Image blobs + HTTP cache** | ~60–80 GB | `ANTIFRAUDIES_DATA_DIR` | `<repo>/data` |
+| **Postgres database** (metadata, features, findings) | a few GB | `ANTIFRAUDIES_DATABASE__DSN` | `postgresql:///antifraudies` |
+
+`ANTIFRAUDIES_DATA_DIR` accepts an **absolute path** (or `~`); it holds `blobs/` and `cache/`.
+Point it at a big external disk so a full scrape doesn't fill your boot drive:
+
+```bash
+# Image bytes on an external SSD (quote paths with spaces):
+export ANTIFRAUDIES_DATA_DIR="/Volumes/Extreme SSD/antifraudies/data"
+
+# Database on another host/port/name (or a different local cluster):
+export ANTIFRAUDIES_DATABASE__DSN="postgresql://user:pass@host:5432/antifraudies"
+
+antifraudies scrape --vendor thermofisher --concurrency 48   # writes blobs to the SSD
+```
+
+To make it permanent, add the `export` lines to your shell profile (`~/.zshrc`), or prefix
+individual commands. Tip: external drives are often **exFAT**, which is fine for image blobs
+but cannot host a Postgres tablespace (no Unix permissions/symlinks) — keep Postgres on an
+APFS/internal disk and only put `ANTIFRAUDIES_DATA_DIR` on the exFAT drive.
 
 ## Status
 

@@ -61,7 +61,10 @@ class Settings(BaseModel):
 
     @property
     def data_dir(self) -> Path:
-        return (self.repo_root / self.paths.data_dir).resolve()
+        # Absolute paths (e.g. an external SSD) and ~ are honored; a relative path is taken
+        # under the repo root. This is what ANTIFRAUDIES_DATA_DIR points at.
+        p = Path(self.paths.data_dir).expanduser()
+        return p.resolve() if p.is_absolute() else (self.repo_root / p).resolve()
 
     @property
     def blobs_dir(self) -> Path:
@@ -107,6 +110,11 @@ def load_settings(config_path: Path | None = None) -> Settings:
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
     data = _apply_env_overrides(data)
+    # Convenience: ANTIFRAUDIES_DATA_DIR is a shorthand for paths.data_dir — the one knob most
+    # people relocate (point the image-blob/cache storage at an external disk). Accepts an
+    # absolute path. The generic override lands it as a top-level "data_dir"; route it to paths.
+    if "data_dir" in data and not isinstance(data["data_dir"], dict):
+        data.setdefault("paths", {})["data_dir"] = data.pop("data_dir")
     return Settings(**data)
 
 

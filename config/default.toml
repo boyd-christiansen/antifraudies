@@ -4,6 +4,8 @@
 
 [paths]
 # Image bytes live on disk (immutable, content-addressed); metadata/features live in Postgres.
+# data_dir holds blobs/ and cache/. Default is <repo>/data; point it anywhere (e.g. an
+# external SSD) with the ANTIFRAUDIES_DATA_DIR env var — see the README "Storage" section.
 data_dir = "data"
 blobs_subdir = "blobs"       # content-addressed image bytes (deduped across the whole catalog)
 cache_subdir = "cache"       # on-disk HTTP cache (small things only; see cache_enabled)
