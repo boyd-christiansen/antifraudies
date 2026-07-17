@@ -8,16 +8,21 @@ where, not about archiving pages.
 
 Throughput: product pages are fetched by a thread pool (``crawl.concurrency``), with each
 worker downloading its product's images. Blob writes happen in the worker threads (atomic,
-content-addressed, concurrency-safe); all SQLite writes happen on the main thread (one
+content-addressed, concurrency-safe); all database writes happen on the main thread (one
 connection, single writer). This finishes the full catalog in well under a day.
 """
 
 from __future__ import annotations
 
+import logging
+import signal
+import threading
 from collections.abc import Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+from tqdm import tqdm
 
 from .adapters.base import ProductRef, VendorAdapter
 from .config import Settings
@@ -26,7 +31,9 @@ from .models import ScrapeResult, VerificationImage
 from .store.blobs import BlobStore
 from .store.db import Database
 
-_COMMIT_EVERY = 100  # products per SQLite commit (see run())
+log = logging.getLogger(__name__)
+
+_COMMIT_EVERY = 100  # products per database commit (see run())
 
 
 @dataclass
@@ -52,52 +59,95 @@ class ScrapeOrchestrator:
         self.db = db
         self.image_blobs = BlobStore(settings.blobs_dir)
         self.concurrency = max(1, settings.crawl.concurrency)
+        self._shutdown = threading.Event()
 
     def run(
         self,
         refs: Iterable[ProductRef],
         *,
         download_images: bool = True,
-        progress_every: int = 1000,
+        total: int | None = None,
+        dry_run: bool = False,
     ) -> ScrapeSummary:
         summary = ScrapeSummary()
         refs_iter = iter(refs)
 
-        with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
-            pending: dict[Future, ProductRef] = {}
+        if dry_run:
+            log.info("dry-run mode: enumerating products without fetching or storing")
+            for ref in refs_iter:
+                log.debug("would scrape: %s %s", ref.catalog_number, ref.product_url)
+                summary.products += 1
+            return summary
 
-            def submit_next() -> bool:
-                ref = next(refs_iter, None)
-                if ref is None:
-                    return False
-                pending[ex.submit(self._fetch_one, ref, download_images)] = ref
-                return True
+        # Graceful shutdown: Ctrl-C sets the event so we stop submitting new work.
+        prev_handler = signal.getsignal(signal.SIGINT)
 
-            # Keep ~2x concurrency in flight so workers never starve between completions.
-            for _ in range(self.concurrency * 2):
-                if not submit_next():
-                    break
+        def _on_sigint(sig, frame):
+            log.warning("SIGINT received — draining in-flight work and committing…")
+            self._shutdown.set()
 
-            while pending:
-                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
-                for fut in done:
-                    ref = pending.pop(fut)
-                    try:
-                        result = fut.result()
-                    except Exception as exc:  # noqa: BLE001 — one bad product never aborts the run
-                        summary.errors.append(f"{ref.catalog_number}: {exc}")
-                    else:
-                        self._write_result(result, summary)
-                    submit_next()
-                    n = summary.products
-                    # Batch SQLite commits: committing per row fsyncs constantly and stalls
-                    # the main thread, starving the worker pool. Commit every _COMMIT_EVERY.
-                    if n and n % _COMMIT_EVERY == 0:
-                        self.db.commit()
-                    if progress_every and n and n % progress_every == 0:
-                        self._log_progress(summary)
+        signal.signal(signal.SIGINT, _on_sigint)
+
+        pbar = tqdm(
+            total=total,
+            desc="scraping",
+            unit=" products",
+            dynamic_ncols=True,
+        )
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
+                pending: dict[Future, ProductRef] = {}
+
+                def submit_next() -> bool:
+                    if self._shutdown.is_set():
+                        return False
+                    ref = next(refs_iter, None)
+                    if ref is None:
+                        return False
+                    pending[ex.submit(self._fetch_one, ref, download_images)] = ref
+                    return True
+
+                # Keep ~2x concurrency in flight so workers never starve between completions.
+                for _ in range(self.concurrency * 2):
+                    if not submit_next():
+                        break
+
+                while pending:
+                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        ref = pending.pop(fut)
+                        try:
+                            result = fut.result()
+                        except Exception as exc:  # noqa: BLE001 — one bad product never aborts the run
+                            log.error("product %s failed: %s", ref.catalog_number, exc)
+                            summary.errors.append(f"{ref.catalog_number}: {exc}")
+                        else:
+                            self._write_result(result, summary)
+                        submit_next()
+                        n = summary.products
+                        # Batch database commits: committing per row fsyncs constantly and stalls
+                        # the main thread, starving the worker pool.
+                        if n and n % _COMMIT_EVERY == 0:
+                            self.db.commit()
+                        pbar.update(1)
+                        pbar.set_postfix(
+                            imgs=summary.images,
+                            captured=summary.image_bytes_captured,
+                            errors=len(summary.errors),
+                        )
+        finally:
+            pbar.close()
+            signal.signal(signal.SIGINT, prev_handler)
 
         self.db.commit()
+        log.info(
+            "scrape complete: %d products, %d images, %d bytes captured, %d errors",
+            summary.products,
+            summary.images,
+            summary.image_bytes_captured,
+            len(summary.errors),
+        )
         return summary
 
     # -- worker (runs in a thread; no DB access) -----------------------------
@@ -109,8 +159,13 @@ class ScrapeOrchestrator:
                 if img.image_url_full:
                     try:
                         self._capture_image_bytes(img)
-                    except Exception:  # noqa: BLE001 — a missing image never drops the row
-                        pass
+                    except Exception as exc:  # noqa: BLE001 — a missing image never drops the row
+                        log.warning(
+                            "image download failed for %s (%s): %s",
+                            img.image_filename,
+                            img.image_url_full,
+                            exc,
+                        )
         return result
 
     def _capture_image_bytes(self, img: VerificationImage) -> None:
@@ -126,7 +181,7 @@ class ScrapeOrchestrator:
         img.http_status = resp.status_code
         img.captured_at = datetime.now(UTC)
 
-    # -- main-thread persistence (single SQLite writer) ----------------------
+    # -- main-thread persistence (single database writer) --------------------
 
     def _write_result(self, result: ScrapeResult, summary: ScrapeSummary) -> None:
         self.db.upsert_product(result.product)
@@ -138,16 +193,6 @@ class ScrapeOrchestrator:
             key = img.provenance.value
             summary.provenance_counts[key] = summary.provenance_counts.get(key, 0) + 1
         summary.products += 1
-
-    def _log_progress(self, summary: ScrapeSummary) -> None:
-        import sys
-
-        print(
-            f"  ... {summary.products} products, {summary.images} images, "
-            f"{summary.image_bytes_captured} bytes captured, {len(summary.errors)} errors",
-            file=sys.stderr,
-            flush=True,
-        )
 
 
 def _ext_for(filename: str, content_type: str | None) -> str:

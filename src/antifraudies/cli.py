@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import typer
@@ -16,8 +17,11 @@ from .adapters import ADAPTERS
 from .config import get_settings
 from .crawl.http import PoliteClient
 from .crawl.robots import RobotsPolicy
+from .log import setup_logging
 from .scrape import ScrapeOrchestrator, iter_seed_file
 from .store.db import Database
+
+log = logging.getLogger(__name__)
 
 app = typer.Typer(
     add_completion=False,
@@ -44,8 +48,10 @@ def _build(vendor: str, concurrency: int | None = None):
 def enumerate(
     vendor: str = typer.Option("thermofisher", "--vendor", "-v"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max product URLs to list."),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
     """List product URLs from the vendor's robots-allowed sitemaps (no pages fetched)."""
+    setup_logging(verbose=verbose)
     _settings, client, adapter, db = _build(vendor)
     try:
         for ref in adapter.enumerate(limit=limit):
@@ -63,8 +69,11 @@ def scrape(
     concurrency: int = typer.Option(None, "--concurrency", "-c", help="Max requests in flight (overrides config)."),
     no_images: bool = typer.Option(False, "--no-images", help="Record metadata but skip image bytes."),
     resume: bool = typer.Option(False, "--resume", help="Skip products already in the DB (safe to re-run a long crawl)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Enumerate and validate without fetching or storing."),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
     """Scrape products: fetch pages concurrently, store image bytes + metadata rows."""
+    setup_logging(verbose=verbose)
     settings, client, adapter, db = _build(vendor, concurrency=concurrency)
     try:
         if seed is not None:
@@ -76,7 +85,7 @@ def scrape(
             typer.echo(f"resume: skipping {len(done)} already-scraped products")
             refs = (r for r in refs if r.catalog_number not in done)
         orch = ScrapeOrchestrator(settings, client, adapter, db)
-        summary = orch.run(refs, download_images=not no_images)
+        summary = orch.run(refs, download_images=not no_images, dry_run=dry_run)
     finally:
         client.close()
         db.close()
@@ -94,8 +103,12 @@ def scrape(
 
 
 @app.command()
-def report(vendor: str = typer.Option("thermofisher", "--vendor", "-v")) -> None:
+def report(
+    vendor: str = typer.Option("thermofisher", "--vendor", "-v"),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
+) -> None:
     """Demonstrate cross-image queries over the stored corpus (a phase-2 preview)."""
+    setup_logging(verbose=verbose)
     _settings, client, _adapter, db = _build(vendor)
     try:
         typer.echo(f"total images:        {db.count_images()}")
@@ -127,8 +140,10 @@ def report(vendor: str = typer.Option("thermofisher", "--vendor", "-v")) -> None
 @app.command()
 def detect(
     tier: str = typer.Option("0", "--tier", "-t", help="Which tier(s) to run: 0, 1, or all."),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
     """Run forensic detectors over the stored corpus, writing rows into `findings`."""
+    setup_logging(verbose=verbose)
     from .detect import tier0
 
     settings = get_settings()
@@ -152,19 +167,23 @@ def detect(
 def findings(
     limit: int = typer.Option(25, "--limit", "-n"),
     finding_type: str = typer.Option(None, "--type", help="Filter by finding_type."),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
     """List top findings by score (apparent anomalies flagged for human review)."""
+    setup_logging(verbose=verbose)
     settings = get_settings()
     db = Database(settings.database.dsn)
     try:
         where = "WHERE finding_type = %s" if finding_type else ""
-        params = (finding_type,) if finding_type else ()
+        params: list = [finding_type] if finding_type else []
+        # Parameterize LIMIT to avoid any SQL injection surface.
+        params.append(limit)
         rows = db.conn.execute(
             f"""
             SELECT finding_type, severity, n_products, provenance_pair, finding_key, detail
             FROM findings {where}
             ORDER BY score DESC, n_products DESC
-            LIMIT {int(limit)}
+            LIMIT %s
             """,
             params,
         ).fetchall()

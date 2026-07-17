@@ -12,6 +12,9 @@ Embeddings (the pgvector column) are computed by a separate, heavier stage — s
 
 from __future__ import annotations
 
+import contextlib
+import logging
+
 import imagehash
 import numpy as np
 from PIL import Image
@@ -19,9 +22,29 @@ from PIL import Image
 from ..store.blobs import BlobStore
 from ..store.db import Database
 
+log = logging.getLogger(__name__)
+
 VERSION = "0.1"
-# Vendor verification images are small; disable Pillow's decompression-bomb guard.
-Image.MAX_IMAGE_PIXELS = None
+
+# Default Pillow decompression-bomb threshold.  We raise it temporarily inside
+# compute_features() rather than disabling it globally — see _max_pixels_override().
+_DEFAULT_MAX_PIXELS = Image.MAX_IMAGE_PIXELS
+
+
+@contextlib.contextmanager
+def _max_pixels_override(limit: int | None = None):
+    """Temporarily set ``Image.MAX_IMAGE_PIXELS``.
+
+    Vendor verification images are small, but Pillow's default threshold can
+    reject some legitimate large composite panels.  We scope the override to
+    feature computation only so the rest of the process retains the guard.
+    """
+    prev = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = limit
+    try:
+        yield
+    finally:
+        Image.MAX_IMAGE_PIXELS = prev
 
 
 def _grayscale_and_contrast(img: Image.Image) -> tuple[bool, float]:
@@ -50,20 +73,24 @@ def compute_features(db: Database, blobs: BlobStore, *, limit: int | None = None
     if limit:
         q += f" LIMIT {int(limit)}"
     rows = db.conn.execute(q).fetchall()
+    log.info("computing features for %d images", len(rows))
 
     done = 0
     for r in rows:
         path = blobs.find(r["content_sha256"])
         if path is None:
+            log.debug("blob not found for sha256=%s (image_id=%s)", r["content_sha256"], r["id"])
             continue
         try:
-            with Image.open(path) as img:
-                img.load()
-                w, h = img.size
-                phash = str(imagehash.phash(img))
-                dhash = str(imagehash.dhash(img))
-                is_gray, contrast = _grayscale_and_contrast(img)
-        except Exception:  # noqa: BLE001 — a corrupt image never aborts the batch
+            with _max_pixels_override(limit=None):
+                with Image.open(path) as img:
+                    img.load()
+                    w, h = img.size
+                    phash = str(imagehash.phash(img))
+                    dhash = str(imagehash.dhash(img))
+                    is_gray, contrast = _grayscale_and_contrast(img)
+        except Exception as exc:  # noqa: BLE001 — a corrupt image never aborts the batch
+            log.warning("feature extraction failed for %s: %s", path.name, exc)
             continue
 
         db.conn.execute(
@@ -89,5 +116,7 @@ def compute_features(db: Database, blobs: BlobStore, *, limit: int | None = None
         done += 1
         if done % 500 == 0:
             db.commit()
+            log.info("  ... %d / %d features computed", done, len(rows))
     db.commit()
+    log.info("feature computation complete: %d images processed", done)
     return done

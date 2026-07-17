@@ -178,6 +178,17 @@ def parse_product_page(
     if value:
         for group_key, rec in parse_media_items(value):
             images.append(record_to_image(group_key, rec, catalog_number=catalog_number))
+    elif "tfs-media-gallery" not in html:
+        # The page HTML lacks the expected Angular directive entirely — this is likely a
+        # captcha, Akamai block, login redirect, or other non-product response.  Log so
+        # operators can distinguish "no images on this product" from "we were blocked."
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "page for %s has no tfs-media-gallery directive — possible block/captcha (%s)",
+            catalog_number,
+            product_url,
+        )
     return product, images
 
 

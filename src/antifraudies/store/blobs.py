@@ -13,6 +13,8 @@ The database is the single source of metadata; blobs hold only the pixels.
 from __future__ import annotations
 
 import hashlib
+import os
+import uuid
 from pathlib import Path
 
 
@@ -43,10 +45,17 @@ class BlobStore:
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             # Write to a temp file then atomically rename, so a partial write never
-            # masquerades as a complete, hash-named object.
-            tmp = path.with_suffix(path.suffix + ".tmp")
+            # masquerades as a complete, hash-named object. The temp name is unique
+            # per writer (pid + uuid) so concurrent threads/processes storing the
+            # SAME content never share a temp path and clobber each other's write.
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
             tmp.write_bytes(data)
-            tmp.rename(path)
+            try:
+                tmp.rename(path)
+            except FileExistsError:
+                # Another writer won the race. Blobs are content-addressed, so the
+                # destination already holds byte-identical content — discard our temp.
+                tmp.unlink(missing_ok=True)
         return digest
 
     def path(self, digest: str, ext: str = "bin") -> Path:

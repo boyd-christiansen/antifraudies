@@ -2,9 +2,7 @@
 
 Holds the queryable records, derived features (incl. embeddings), and findings. A few
 cross-image query helpers demonstrate the whole-corpus comparisons phase 2 builds on.
-Upserts are idempotent so re-scraping a product never duplicates rows. SQLite was the
-phase-1 store; we moved to Postgres+pgvector now to avoid a migration once embeddings and
-ANN search arrive in phase 2.
+Upserts are idempotent so re-scraping a product never duplicates rows.
 """
 
 from __future__ import annotations
@@ -32,11 +30,40 @@ def _split_statements(sql: str) -> list[str]:
 
 
 class Database:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, max_retries: int = 3, retry_delay: float = 2.0) -> None:
         self.dsn = dsn
-        self.conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+        self.conn = self._connect_with_retry(dsn, max_retries, retry_delay)
         register_vector(self.conn)
         self._init_schema()
+
+    @staticmethod
+    def _connect_with_retry(
+        dsn: str, max_retries: int, retry_delay: float
+    ) -> psycopg.Connection:
+        """Connect to PostgreSQL with exponential backoff on transient failures."""
+        import logging
+        import time
+
+        log = logging.getLogger(__name__)
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+            except psycopg.OperationalError as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    delay = retry_delay * (2 ** attempt)
+                    log.warning(
+                        "Postgres connection attempt %d/%d failed: %s — retrying in %.1fs",
+                        attempt + 1,
+                        max_retries + 1,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+        raise psycopg.OperationalError(
+            f"failed to connect after {max_retries + 1} attempts: {last_exc}"
+        ) from last_exc
 
     def _init_schema(self) -> None:
         with self.conn.cursor() as cur:

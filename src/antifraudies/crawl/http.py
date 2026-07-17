@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 import threading
 import time
@@ -28,6 +29,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..config import Settings
+
+log = logging.getLogger(__name__)
+
+# Responses larger than this are not cached on disk to prevent multi-GB cache
+# bloat (the cache hex-encodes content, so a 2 MB image becomes a 4 MB+ JSON file).
+_MAX_CACHEABLE_BYTES = 2 * 1024 * 1024
 
 
 @dataclass
@@ -163,6 +170,7 @@ class PoliteClient:
                 r = self._client.get(url)
             except httpx.HTTPError as exc:  # transport-level
                 last_exc = exc
+                log.debug("transport error on %s (attempt %d): %s", url, attempt + 1, exc)
                 self._backoff(attempt)
                 continue
 
@@ -173,10 +181,11 @@ class PoliteClient:
                 headers={k.lower(): v for k, v in r.headers.items()},
             )
             if resp.status_code in _RETRYABLE_STATUS and attempt < self.cfg.max_retries:
+                log.debug("retryable %d on %s (attempt %d)", resp.status_code, url, attempt + 1)
                 self._backoff(attempt, retry_after=resp.headers.get("retry-after"))
                 continue
 
-            if use_cache:
+            if use_cache and len(resp.content) <= _MAX_CACHEABLE_BYTES:
                 self._write_cache("GET", url, resp)
             return resp
 

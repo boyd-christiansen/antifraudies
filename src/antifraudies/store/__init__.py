@@ -1,4 +1,4 @@
-"""Shared evidence store: SQLite for normalized records, filesystem for raw bytes."""
+"""Shared evidence store: PostgreSQL for normalized records, filesystem for raw bytes."""
 
 from .blobs import BlobStore
 from .db import Database
